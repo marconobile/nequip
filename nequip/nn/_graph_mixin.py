@@ -13,6 +13,8 @@ from nequip.utils import instantiate
 class GraphModuleMixin:
     r"""Mixin parent class for ``torch.nn.Module``s that act on and return ``AtomicDataDict.Type`` graph data.
 
+    Mixin class contains methods for use by other classes, enforced by inheritance
+
     All such classes should call ``_init_irreps`` in their ``__init__`` functions with information on the data fields they expect, require, and produce, as well as their corresponding irreps.
     """
 
@@ -23,7 +25,9 @@ class GraphModuleMixin:
         required_irreps_in: Sequence[str] = [],
         irreps_out: Dict[str, Any] = {},
     ):
-        """Setup the expected data fields and their irreps for this graph module.
+        """
+        #! superficial intuition: this method acts as a setter for irreps_in/irreps_out
+        Setup the expected data fields and their irreps for this graph module.
 
         ``None`` is a valid irreps in the context for anything that is invariant but not well described by an ``e3nn.o3.Irreps``. An example are edge indexes in a graph, which are invariant but are integers, not ``0e`` scalars.
 
@@ -121,6 +125,7 @@ class GraphModuleMixin:
 
 class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
     r"""A ``torch.nn.Sequential`` of ``GraphModuleMixin``s.
+    SequentialGraphNetwork: a class that build a network through a Sequential of layers, all of which input and output a graph.
 
     Args:
         modules (list or dict of ``GraphModuleMixin``s): the sequence of graph modules. If a list, the modules will be named ``"module0", "module1", ...``.
@@ -217,7 +222,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             OrderedDict(zip(layers.keys(), built_modules)),
         )
 
-    @torch.jit.unused
     def append(self, name: str, module: GraphModuleMixin) -> None:
         r"""Append a module to the SequentialGraphNetwork.
 
@@ -230,14 +234,13 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         self.irreps_out = dict(module.irreps_out)
         return
 
-    @torch.jit.unused
     def append_from_parameters(
         self,
         shared_params: Mapping,
         name: str,
         builder: Callable,
         params: Dict[str, Any] = {},
-    ) -> GraphModuleMixin:
+    ) -> None:
         r"""Build a module from parameters and append it.
 
         Args:
@@ -245,9 +248,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             name (str): the name for the module
             builder (callable): a class or function to build a module
             params (dict, optional): extra specific parameters for this module that take priority over those in ``shared_params``
-
-        Returns:
-            the build module
         """
         instance, _ = instantiate(
             builder=builder,
@@ -257,9 +257,8 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             all_args=shared_params,
         )
         self.append(name, instance)
-        return instance
+        return
 
-    @torch.jit.unused
     def insert(
         self,
         name: str,
@@ -317,7 +316,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
 
         return
 
-    @torch.jit.unused
     def insert_from_parameters(
         self,
         shared_params: Mapping,
@@ -326,7 +324,7 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         params: Dict[str, Any] = {},
         after: Optional[str] = None,
         before: Optional[str] = None,
-    ) -> GraphModuleMixin:
+    ) -> None:
         r"""Build a module from parameters and insert it after ``after``.
 
         Args:
@@ -336,9 +334,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             params (dict, optional): extra specific parameters for this module that take priority over those in ``shared_params``
             after: the name of the module to insert after
             before: the name of the module to insert before
-
-        Returns:
-            the inserted module
         """
         if (before is None) is (after is None):
             raise ValueError("Only one of before or after argument needs to be defined")
@@ -357,10 +352,12 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             all_args=shared_params,
         )
         self.insert(after=after, before=before, name=name, module=instance)
-        return instance
+        return
 
     # Copied from https://pytorch.org/docs/stable/_modules/torch/nn/modules/container.html#Sequential
     # with type annotations added
+    # AtomicDataDict is the fundamental input to the network
+    # it maps string keys to torch.Tensors, ensures model is TorchScript compatible
     def forward(self, input: AtomicDataDict.Type) -> AtomicDataDict.Type:
         for module in self:
             input = module(input)

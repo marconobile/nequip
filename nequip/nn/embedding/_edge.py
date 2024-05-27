@@ -50,10 +50,13 @@ class SphericalHarmonicEdgeAttrs(GraphModuleMixin, torch.nn.Module):
         )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        data = AtomicDataDict.with_edge_vectors(data, with_lengths=False)
+        # dict_keys(['edge_index', 'pos', 'batch', 'ptr', 'edge_cell_shift', 'cell', 'pbc', 'r_max', 'atom_types', 'node_attrs', 'node_features'])
+        # with_edge_vectors: Compute the edge displacement vectors for a graph. Returns: Tensor[n_edges, 3] edge displacement vectors
+        data = AtomicDataDict.with_edge_vectors(data, with_lengths=False) # adds 'edge_vectors' key to data dict
         edge_vec = data[AtomicDataDict.EDGE_VECTORS_KEY]
         edge_sh = self.sh(edge_vec)
-        data[self.out_field] = edge_sh
+        data[self.out_field] = edge_sh # self.out_field = 'edge_attrs'; adds 'edge_attrs' to dict; L_max = taken from yaml
+        # self.irreps_edge_sh.__len__() = L_max-1 -> irreps to be computed for the edge displacement vectors (eg if = 3 then L_max = 2)
         return data
 
 
@@ -76,39 +79,15 @@ class RadialBasisEdgeEncoding(GraphModuleMixin, torch.nn.Module):
         self.out_field = out_field
         self._init_irreps(
             irreps_in=irreps_in,
-            irreps_out={
-                self.out_field: o3.Irreps([(self.basis.num_basis, (0, 1))]),
-                AtomicDataDict.EDGE_CUTOFF_KEY: "0e",
-            },
+            irreps_out={self.out_field: o3.Irreps([(self.basis.num_basis, (0, 1))])},
         )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        # with_edge_vectors: Compute the edge displacement vectors for a graph. Returns: Tensor[n_edges, 3] edge displacement vectors
         data = AtomicDataDict.with_edge_vectors(data, with_lengths=True)
-        edge_length = data[AtomicDataDict.EDGE_LENGTH_KEY]
-        cutoff = self.cutoff(edge_length).unsqueeze(-1)
-        edge_length_embedded = self.basis(edge_length) * cutoff
-        data[self.out_field] = edge_length_embedded
-        data[AtomicDataDict.EDGE_CUTOFF_KEY] = cutoff
-        return data
-
-
-@compile_mode("script")
-class AddRadialCutoffToData(GraphModuleMixin, torch.nn.Module):
-    def __init__(
-        self,
-        cutoff=PolynomialCutoff,
-        cutoff_kwargs={},
-        irreps_in=None,
-    ):
-        super().__init__()
-        self.cutoff = cutoff(**cutoff_kwargs)
-        self._init_irreps(
-            irreps_in=irreps_in, irreps_out={AtomicDataDict.EDGE_CUTOFF_KEY: "0e"}
+        edge_length = data[AtomicDataDict.EDGE_LENGTH_KEY] # 'edge_lengths' -> norms of bonds: lenght of edges/pairwise distances
+        edge_length_embedded = (
+            self.basis(edge_length) * self.cutoff(edge_length)[:, None]
         )
-
-    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        data = AtomicDataDict.with_edge_vectors(data, with_lengths=True)
-        edge_length = data[AtomicDataDict.EDGE_LENGTH_KEY]
-        cutoff = self.cutoff(edge_length).unsqueeze(-1)
-        data[AtomicDataDict.EDGE_CUTOFF_KEY] = cutoff
+        data[self.out_field] = edge_length_embedded # 'edge_embedding': Bessel encoding of bond lenghts
         return data

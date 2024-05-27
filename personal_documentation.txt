@@ -1,0 +1,140 @@
+this colab can be used for the testing part: https://colab.research.google.com/drive/1_r348f6oIyKxH4FnpKeD8g4QjwDhP8mT?usp=sharing#scrollTo=2q_GyQfC0npt
+
+config file is read-only
+
+entry point and file to launch: scripts/train.Python
+
+it takes multiple args (look at train.py.parse_command_line() for args)
+core arg-> config file eg: configs/example.yaml
+
+
+
+step 1 instanciate config obj after parsing cmd line (config.py Config - it acts as a dict)
+furthermore a DEFAULT CONFIG is created. Whenever a param is not specified in the yaml -> it is taken from here!
+eg if u do not provide any model layer/object it will create:
+    model_builders=[
+        "SimpleIrrepsConfig", # shape generation if needed, check pre-condition if needed
+        "EnergyModel",
+        "PerSpeciesRescale",
+        "ForceOutput",
+        "RescaleEnergyEtc",
+    ],
+`model_builders` defines a series of functions that will be called to construct the model, each model builder has the opportunity to update the model, the config, or both
+MODEL INSTACIATION:
+SimpleIrrepsConfig is the first builder to be called, does not have any return
+    yet to undestand what it does
+Then the second builder to be called is EnergyModel, it instanciates a SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential)
+    and every other next builder accept as first input a (model: GraphModuleMixin) so sequentially as in the builder DP the model is built
+    the final model that is going to be actually used is the model returned by RescaleEnergyEtc
+actually each entry in the list wraps the previously defined model s.t. exten its forward
+
+
+
+the steps below are actually executed both for fresh_start and for restart_train
+step 2 if run_name already present then continues training, else fresh start, results stored in nequip/results
+    set globals/ globals setup
+    here at the end auto_init of what?
+
+step 3 instanciate trainer (either to restart or to fresh start, using wandb or not)
+    trainer loads all its data_members in config
+    trainer is well documented; impo u need to call trainer.set_dataset() b4 trainer.train();
+    the dset is in the trainer
+    before set_dataset we need to:
+    1 data/_build.py->dataset_from_config()
+    2 model/_build.py->model_from_config() and trainer.model = final_model; look above at MODEL INSTACIATION to see how this is done
+
+step 4: trainer.train() launches training loop, normal trainer execution, check pseudocode in trainer docs
+
+---------------
+
+CORE: understand well AtomicData.py
+
+directory struct:
+
+1 nequip/nequip/scripts/
+    - train.py -> main launch file
+
+2 nequip/nequip/data/
+    - _keys.py -> contains set of const final strs that are used at global scope
+                  weirdly these strs are accessed via AtomicDataDict.py to make stuff work with TorchScript: AtomicDataDict.FINAL_STRING
+
+    - AtomicData.py -> To be able to pass numpy-loaded data to the network, we need to transfrom the input into correct dtype.
+                       AtomicData object is a neighbor graph that inherits from PyTorch-Geometric's Data object
+                       and the from_points() method transforms numpy/pytorch inputs into AtomicData graph suitable for NequIP.
+
+                       this file contains 4 set of strings that are the keys of:
+                       _NODE_FIELDS
+                       _EDGE_FIELDS
+                       _GRAPH_FIELDS
+                       _LONG_FIELDS which again are sets of strings
+                       #! what the fuck here
+    - _build.py -> parse config yaml and returns dataset, it uses instanciate from auto_init <- this function is responsible for the call of each ctor
+
+
+    - AtomicDataDict.Type = Dict[str, torch.Tensor]; model uses AtomicDataDict.Type
+
+
+
+3 nequip/nequip/model/
+    - _build.py -> parse config yaml and returns model, it uses instanciate from auto_init
+    - _eng.py -> contains energy model (the actual model) and the networks-shapes-checker (SimpleIrrepsConfig)
+
+4 nequip/nequip/nn/
+    contains all the modules for the net
+    nequip/nn/_convnetlayer.py uses nequip/nn/_interaction_block.py
+
+5 nequip/nequip/train/
+
+6 nequip/nequip/utils/
+    - config.py -> data struct in which is loaded config yaml,
+                   you can read/write from/to config as normal dict: config["key"] = val
+                   IMPO: config._items is the actual dict with k:v from yaml
+    - _global_options.py -> set globals in project; creates also a global config in _latest_global_config
+    - auto_init.py -> i think this one reads the yaml classes and instanciates them with the correct args, args are passed as prefix_ in yaml
+
+
+--------------
+Questions:
+AtomicData.py:
+- line 63 wtf is going on with all these sets of the same stuff??
+
+_global_config.py:
+- line 18 why the hell a global dict if u have Config class? multiprocessing/threading?
+- line 84 instantiate(register_fields, all_args=config)
+
+
+- batch size = 10? in yaml ho batch_size: 5  but in data['batch'] ho:
+tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6,
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+        9, 9, 9, 9, 9, 9], device='cuda:0')
+
+------------------------------------------
+@classmethods are ctors callable as Class.f(); usually these @classmethods use instantiate()
+auto_init.py instantiate is crucial to be undestood
+
+
+----------------
+model forward:
+step 1) OneHotAtomEncoding: one hot of atom types, adds node_attrs, node_features to data dict for this forward;
+    adds; 'node_attrs', 'node_features', both are one-hot of 'atom_types'
+step 2) SphericalHarmonicEdgeAttrs compute neighbours for each atom and embedds agular component of edges
+    adds: 'edge_vectors': actual displacement vectors, 'edge_attrs': SH encodings of 'edge_vectors'
+step 3) RadialBasisEdgeEncoding: encodes radial component of edges
+    adds: 'edge_lengths': lenghts of edges, 'edge_embedding': bessel func encoding of radial component
+step 4) AtomwiseLinear: atom feature from 1hot to 32x0e via multiple
+--
+
+
+-------------------------------------------
+IMPO: difference between equivariant Linear layer and tensor product:
+the equivariant linear layer is a layer that DOES NOT MIX information coming from different angular frequencies (i.e. from different Ls) while
+the FullyConnectedTensorProduct is a layer that DO MIX information coming from different angular frequencies (i.e. from different Ls)
+The idea is that (equivariant) Linear layer updates feature vectors such to make the "more useful" for the task at hand,
+it performs a "functional" update of features, it recombines info that is contained in an angular frequency, each the objects at each L is able to
+share infomation in a self-contained manner.
+The FullyConnectedTensorProduct on the other hand mixes information at different angular frequencies, "creating" thus new information (instead of simply recombining it).
+This is the only way indeed to CREATE new Ls, this layer has lower expressivity then the linear layer wrt the final task but has more "data-extraction" power.

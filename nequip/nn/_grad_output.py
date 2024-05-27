@@ -1,4 +1,5 @@
 from typing import List, Union, Optional
+import warnings
 
 import torch
 
@@ -12,6 +13,7 @@ from nequip.nn import GraphModuleMixin
 @compile_mode("script")
 class GradientOutput(GraphModuleMixin, torch.nn.Module):
     r"""Wrap a model and include as an output its gradient.
+    A general class to compute arbitrary gradients.
 
     Args:
         func: the model to wrap
@@ -192,6 +194,10 @@ class StressOutput(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
 
+        warnings.warn(
+            "!! Stresses in NequIP are in BETA and UNDER DEVELOPMENT: _please_ carefully check the sanity of your results and report any (potential) issues on the GitHub"
+        )
+
         if not do_forces:
             raise NotImplementedError
         self.do_forces = do_forces
@@ -204,23 +210,17 @@ class StressOutput(GraphModuleMixin, torch.nn.Module):
             irreps_out=self.func.irreps_out.copy(),
         )
         self.irreps_out[AtomicDataDict.FORCE_KEY] = "1o"
-        self.irreps_out[AtomicDataDict.STRESS_KEY] = "1o"
-        self.irreps_out[AtomicDataDict.VIRIAL_KEY] = "1o"
+        self.irreps_out[AtomicDataDict.STRESS_KEY] = "3x1o"
+        self.irreps_out[AtomicDataDict.VIRIAL_KEY] = "3x1o"
 
         # for torchscript compat
         self.register_buffer("_empty", torch.Tensor())
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        assert AtomicDataDict.EDGE_VECTORS_KEY not in data
+        data = AtomicDataDict.with_batch(data)
 
-        if AtomicDataDict.BATCH_KEY in data:
-            batch = data[AtomicDataDict.BATCH_KEY]
-            num_batch: int = len(data[AtomicDataDict.BATCH_PTR_KEY]) - 1
-        else:
-            # Special case for efficiency
-            batch = self._empty
-            num_batch: int = 1
-
+        batch = data[AtomicDataDict.BATCH_KEY]
+        num_batch: int = int(batch.max().cpu().item()) + 1
         pos = data[AtomicDataDict.POSITIONS_KEY]
 
         has_cell: bool = AtomicDataDict.CELL_KEY in data
@@ -244,13 +244,10 @@ class StressOutput(GraphModuleMixin, torch.nn.Module):
         # Knuth et. al. Comput. Phys. Commun 190, 33-50, 2015
         # https://pure.mpg.de/rest/items/item_2085135_9/component/file_2156800/content
         displacement = torch.zeros(
-            (3, 3),
+            (num_batch, 3, 3),
             dtype=pos.dtype,
             device=pos.device,
         )
-        if num_batch > 1:
-            # add n_batch dimension
-            displacement = displacement.view(-1, 3, 3).expand(num_batch, 3, 3)
         displacement.requires_grad_(True)
         data["_displacement"] = displacement
         # in the above paper, the infinitesimal distortion is *symmetric*
@@ -267,18 +264,10 @@ class StressOutput(GraphModuleMixin, torch.nn.Module):
         symmetric_displacement = 0.5 * (displacement + displacement.transpose(-1, -2))
         did_pos_req_grad: bool = pos.requires_grad
         pos.requires_grad_(True)
-        if num_batch > 1:
-            # bmm is natom in batch
-            # batched [natom, 1, 3] @ [natom, 3, 3] -> [natom, 1, 3] -> [natom, 3]
-            data[AtomicDataDict.POSITIONS_KEY] = pos + torch.bmm(
-                pos.unsqueeze(-2), torch.index_select(symmetric_displacement, 0, batch)
-            ).squeeze(-2)
-        else:
-            # [natom, 3] @ [3, 3] -> [natom, 3]
-            data[AtomicDataDict.POSITIONS_KEY] = torch.addmm(
-                pos, pos, symmetric_displacement
-            )
-        # assert torch.equal(pos, data[AtomicDataDict.POSITIONS_KEY])
+        # bmm is natom in batch
+        data[AtomicDataDict.POSITIONS_KEY] = pos + torch.bmm(
+            pos.unsqueeze(-2), symmetric_displacement[batch]
+        ).squeeze(-2)
         # we only displace the cell if we have one:
         if has_cell:
             # bmm is num_batch in batch
@@ -288,18 +277,9 @@ class StressOutput(GraphModuleMixin, torch.nn.Module):
             # there would then be an infinitesimal rotation of the positions
             # but not cell, and it thus wouldn't be global and have
             # no effect due to equivariance/invariance.
-            if num_batch > 1:
-                # [n_batch, 3, 3] @ [n_batch, 3, 3]
-                data[AtomicDataDict.CELL_KEY] = cell + torch.bmm(
-                    cell, symmetric_displacement
-                )
-            else:
-                # [3, 3] @ [3, 3] --- enforced to these shapes
-                tmpcell = cell.squeeze(0)
-                data[AtomicDataDict.CELL_KEY] = torch.addmm(
-                    tmpcell, tmpcell, symmetric_displacement
-                ).unsqueeze(0)
-            # assert torch.equal(cell, data[AtomicDataDict.CELL_KEY])
+            data[AtomicDataDict.CELL_KEY] = cell + torch.bmm(
+                cell, symmetric_displacement
+            )
 
         # Call model and get gradients
         data = self.func(data)
@@ -323,21 +303,19 @@ class StressOutput(GraphModuleMixin, torch.nn.Module):
         if virial is None:
             # condition needed to unwrap optional for torchscript
             assert False, "failed to compute virial autograd"
-        virial = virial.view(num_batch, 3, 3)
 
         # we only compute the stress (1/V * virial) if we have a cell whose volume we can compute
         if has_cell:
             # ^ can only scale by cell volume if we have one...:
             # Rescale stress tensor
             # See https://github.com/atomistic-machine-learning/schnetpack/blob/master/src/schnetpack/atomistic/output_modules.py#L180
-            # See also https://en.wikipedia.org/wiki/Triple_product
-            # See also https://gitlab.com/ase/ase/-/blob/master/ase/cell.py,
-            #          which uses np.abs(np.linalg.det(cell))
             # First dim is batch, second is vec, third is xyz
-            # Note the .abs(), since volume should always be positive
-            # det is equal to a dot (b cross c)
-            volume = torch.linalg.det(cell).abs().unsqueeze(-1)
-            stress = virial / volume.view(num_batch, 1, 1)
+            volume = torch.einsum(
+                "zi,zi->z",
+                cell[:, 0, :],
+                torch.cross(cell[:, 1, :], cell[:, 2, :], dim=1),
+            ).unsqueeze(-1)
+            stress = virial / volume.view(-1, 1, 1)
             data[AtomicDataDict.CELL_KEY] = orig_cell
         else:
             stress = self._empty  # torchscript

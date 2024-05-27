@@ -26,7 +26,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         invariant_neurons=8,
         avg_num_neighbors=None,
         use_sc=True,
-        nonlinearity_scalars: Dict[int, Callable] = {"e": "silu"},
+        nonlinearity_scalars: Dict[int, Callable] = {"e": "ssp"},
     ) -> None:
         """
         InteractionBlock.
@@ -155,7 +155,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
 
         :return:
         """
-        weight = self.fc(data[AtomicDataDict.EDGE_EMBEDDING_KEY])
+        weight = self.fc(data[AtomicDataDict.EDGE_EMBEDDING_KEY]) # weights used for the tensor prod
 
         x = data[AtomicDataDict.NODE_FEATURES_KEY]
         edge_src = data[AtomicDataDict.EDGE_INDEX_KEY][1]
@@ -168,13 +168,12 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         edge_features = self.tp(
             x[edge_src], data[AtomicDataDict.EDGE_ATTRS_KEY], weight
         )
-        # divide first for numerics, scatter is linear
+        x = scatter(edge_features, edge_dst, dim=0, dim_size=len(x))
+
         # Necessary to get TorchScript to be able to type infer when its not None
         avg_num_neigh: Optional[float] = self.avg_num_neighbors
         if avg_num_neigh is not None:
-            edge_features = edge_features.div(avg_num_neigh**0.5)
-        # now scatter down
-        x = scatter(edge_features, edge_dst, dim=0, dim_size=len(x))
+            x = x.div(avg_num_neigh**0.5)
 
         x = self.linear_2(x)
 

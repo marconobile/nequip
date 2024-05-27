@@ -5,9 +5,8 @@ Authors: Albert Musaelian
 
 import warnings
 from copy import deepcopy
-from typing import Union, Tuple, Dict, Optional, List, Set, Sequence, Final
+from typing import Union, Tuple, Dict, Optional, List, Set, Sequence
 from collections.abc import Mapping
-import os
 
 import numpy as np
 import ase.neighborlist
@@ -26,7 +25,7 @@ from nequip.utils.torch_geometric import Data
 # A type representing ASE-style periodic boundary condtions, which can be partial (the tuple case)
 PBC = Union[bool, Tuple[bool, bool, bool]]
 
-
+# type(_DEFAULT_GRAPH_FIELDS) set
 _DEFAULT_LONG_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_INDEX_KEY,
     AtomicDataDict.ATOMIC_NUMBERS_KEY,
@@ -50,8 +49,6 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_ATTRS_KEY,
     AtomicDataDict.EDGE_EMBEDDING_KEY,
     AtomicDataDict.EDGE_FEATURES_KEY,
-    AtomicDataDict.EDGE_CUTOFF_KEY,
-    AtomicDataDict.EDGE_ENERGY_KEY,
 }
 _DEFAULT_GRAPH_FIELDS: Set[str] = {
     AtomicDataDict.TOTAL_ENERGY_KEY,
@@ -59,16 +56,15 @@ _DEFAULT_GRAPH_FIELDS: Set[str] = {
     AtomicDataDict.VIRIAL_KEY,
     AtomicDataDict.PBC_KEY,
     AtomicDataDict.CELL_KEY,
-    AtomicDataDict.BATCH_PTR_KEY,
 }
-_NODE_FIELDS: Set[str] = set(_DEFAULT_NODE_FIELDS)
-_EDGE_FIELDS: Set[str] = set(_DEFAULT_EDGE_FIELDS)
+_NODE_FIELDS: Set[str]  = set(_DEFAULT_NODE_FIELDS)
+_EDGE_FIELDS: Set[str]  = set(_DEFAULT_EDGE_FIELDS)
 _GRAPH_FIELDS: Set[str] = set(_DEFAULT_GRAPH_FIELDS)
-_LONG_FIELDS: Set[str] = set(_DEFAULT_LONG_FIELDS)
+_LONG_FIELDS: Set[str]  = set(_DEFAULT_LONG_FIELDS)
 
 
 def register_fields(
-    node_fields: Sequence[str] = [],
+    node_fields: Sequence[str] = [], # Sequence: generic iterable supporting "len" and "__getitem__"
     edge_fields: Sequence[str] = [],
     graph_fields: Sequence[str] = [],
     long_fields: Sequence[str] = [],
@@ -82,7 +78,6 @@ def register_fields(
     node_fields: set = set(node_fields)
     edge_fields: set = set(edge_fields)
     graph_fields: set = set(graph_fields)
-    long_fields: set = set(long_fields)
     allfields = node_fields.union(edge_fields, graph_fields)
     assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields)
     _NODE_FIELDS.update(node_fields)
@@ -112,17 +107,6 @@ def deregister_fields(*fields: Sequence[str]) -> None:
         _NODE_FIELDS.discard(f)
         _EDGE_FIELDS.discard(f)
         _GRAPH_FIELDS.discard(f)
-
-
-def _register_field_prefix(prefix: str) -> None:
-    """Re-register all registered fields as the same type, but with `prefix` added on."""
-    assert prefix.endswith("_")
-    register_fields(
-        node_fields=[prefix + e for e in _NODE_FIELDS],
-        edge_fields=[prefix + e for e in _EDGE_FIELDS],
-        graph_fields=[prefix + e for e in _GRAPH_FIELDS],
-        long_fields=[prefix + e for e in _LONG_FIELDS],
-    )
 
 
 def _process_dict(kwargs, ignore_fields=[]):
@@ -157,13 +141,6 @@ def _process_dict(kwargs, ignore_fields=[]):
             # ^ this tensor is a scalar; we need to give it
             # a data dimension to play nice with irreps
             kwargs[k] = v
-        elif isinstance(v, torch.Tensor):
-            # This is a tensor, so we just don't do anything except avoid the warning in the `else`
-            pass
-        else:
-            warnings.warn(
-                f"Value for field {k} was of unsupported type {type(v)} (value was {v})"
-            )
 
     if AtomicDataDict.BATCH_KEY in kwargs:
         num_frames = kwargs[AtomicDataDict.BATCH_KEY].max() + 1
@@ -206,14 +183,22 @@ def _process_dict(kwargs, ignore_fields=[]):
 class AtomicData(Data):
     """A neighbor graph for points in (periodic triclinic) real space.
 
+    To be able to pass numpy-loaded data to the network, we need to transfrom the input into correct dtype.
+    AtomicData object is a neighbor graph that inherits from PyTorch-Geometric's Data object
+    and the from_points() method transforms numpy/pytorch inputs into AtomicData graph suitable for NequIP.
+
     For typical cases either ``from_points`` or ``from_ase`` should be used to
     construct a AtomicData; they also standardize and check their input much more
     thoroughly.
 
-    In general, ``node_features`` are features or input information on the nodes that will be fed through and transformed by the network, while ``node_attrs`` are _encodings_ fixed, inherant attributes of the atoms themselves that remain constant through the network.
-    For example, a one-hot _encoding_ of atomic species is a node attribute, while some observed instantaneous property of that atom (current partial charge, for example), would be a feature.
+    ``node_features``: features or input information on the nodes that will be fed through and transformed by the network,
+    ``node_attrs`` are _encodings_ fixed, inherant attributes of the atoms themselves that remain constant through the network.
+    For example, a one-hot _encoding_ of atomic species is a node attribute,
+    while some observed instantaneous property of that atom (current partial charge, for example), would be a feature.
 
-    In general, ``torch.Tensor`` arguments should be of consistant dtype. Numpy arrays will be converted to ``torch.Tensor``s; those of floating point dtype will be converted to ``torch.get_current_dtype()`` regardless of their original precision. Scalar values (Python scalars or ``torch.Tensor``s of shape ``()``) a resized to tensors of shape ``[1]``. Per-atom scalar values should be given with shape ``[N_at, 1]``.
+    In general, ``torch.Tensor`` arguments should be of consistant dtype.
+    Numpy arrays will be converted to ``torch.Tensor``s; those of floating point dtype will be converted to ``torch.get_current_dtype()`` regardless of their original precision.
+    Scalar values (Python scalars or ``torch.Tensor``s of shape ``()``) a resized to tensors of shape ``[1]``. Per-atom scalar values should be given with shape ``[N_atoms, 1]``.
 
     ``AtomicData`` should be used for all data creation and manipulation outside of the model; inside of the model ``AtomicDataDict.Type`` is used.
 
@@ -236,6 +221,7 @@ class AtomicData(Data):
     def __init__(
         self, irreps: Dict[str, e3nn.o3.Irreps] = {}, _validate: bool = True, **kwargs
     ):
+
         # empty init needed by get_example
         if len(kwargs) == 0 and len(irreps) == 0:
             super().__init__()
@@ -426,6 +412,7 @@ class AtomicData(Data):
         )
 
         if atoms.calc is not None:
+
             if isinstance(
                 atoms.calc, (SinglePointCalculator, SinglePointDFTCalculator)
             ):
@@ -620,6 +607,10 @@ class AtomicData(Data):
     def to_AtomicDataDict(
         data: Union[Data, Mapping], exclude_keys=tuple()
     ) -> AtomicDataDict.Type:
+        '''
+        pyg to data dict
+        '''
+
         if isinstance(data, Data):
             keys = data.keys
         elif isinstance(data, Mapping):
@@ -701,18 +692,6 @@ class AtomicData(Data):
         return type(self)(**new_dict)
 
 
-_ERROR_ON_NO_EDGES: bool = os.environ.get("NEQUIP_ERROR_ON_NO_EDGES", "true").lower()
-assert _ERROR_ON_NO_EDGES in ("true", "false")
-_ERROR_ON_NO_EDGES = _ERROR_ON_NO_EDGES == "true"
-
-_NEQUIP_MATSCIPY_NL: Final[bool] = os.environ.get("NEQUIP_MATSCIPY_NL", "false").lower()
-assert _NEQUIP_MATSCIPY_NL in ("true", "false")
-_NEQUIP_MATSCIPY_NL = _NEQUIP_MATSCIPY_NL == "true"
-
-if _NEQUIP_MATSCIPY_NL:
-    import matscipy.neighbours
-
-
 def neighbor_list_and_relative_vec(
     pos,
     r_max,
@@ -790,32 +769,22 @@ def neighbor_list_and_relative_vec(
     # ASE dependent part
     temp_cell = ase.geometry.complete_cell(temp_cell)
 
-    if _NEQUIP_MATSCIPY_NL:
-        assert strict_self_interaction and not self_interaction
-        first_idex, second_idex, shifts = matscipy.neighbours.neighbour_list(
-            "ijS",
-            pbc=pbc,
-            cell=temp_cell,
-            positions=temp_pos,
-            cutoff=float(r_max),
-        )
-    else:
-        first_idex, second_idex, shifts = ase.neighborlist.primitive_neighbor_list(
-            "ijS",
-            pbc,
-            temp_cell,
-            temp_pos,
-            cutoff=float(r_max),
-            self_interaction=strict_self_interaction,  # we want edges from atom to itself in different periodic images!
-            use_scaled_positions=False,
-        )
+    first_idex, second_idex, shifts = ase.neighborlist.primitive_neighbor_list(
+        "ijS",
+        pbc,
+        temp_cell,
+        temp_pos,
+        cutoff=float(r_max),
+        self_interaction=strict_self_interaction,  # we want edges from atom to itself in different periodic images!
+        use_scaled_positions=False,
+    )
 
     # Eliminate true self-edges that don't cross periodic boundaries
     if not self_interaction:
         bad_edge = first_idex == second_idex
         bad_edge &= np.all(shifts == 0, axis=1)
         keep_edge = ~bad_edge
-        if _ERROR_ON_NO_EDGES and (not np.any(keep_edge)):
+        if not np.any(keep_edge):
             raise ValueError(
                 f"Every single atom has no neighbors within the cutoff r_max={r_max} (after eliminating self edges, no edges remain in this system)"
             )

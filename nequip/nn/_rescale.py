@@ -1,4 +1,4 @@
-from typing import Sequence, List, Union, Optional
+from typing import Sequence, List, Union
 
 import torch
 
@@ -6,14 +6,15 @@ from e3nn.util.jit import compile_mode
 
 from nequip.data import AtomicDataDict
 from nequip.nn import GraphModuleMixin
-from nequip.utils import dtype_from_name
 
 
 @compile_mode("script")
 class RescaleOutput(GraphModuleMixin, torch.nn.Module):
     """Wrap a model and rescale its outputs when in ``eval()`` mode.
 
-    Note that scaling/shifting is always done (casting into) ``default_dtype``, even if ``model_dtype`` is lower precision.
+    Since we normalized the targets, the model will also learn in this normalized space.
+    To go back to our actual space, we have to rescale the output.
+    We do this using the RescaleOutput module which wraps a model and rescales its outputs appropriately.
 
     Args:
         model : GraphModuleMixin
@@ -22,6 +23,8 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
             Which fields to rescale.
         shift_keys : list of keys, default []
             Which fields to shift after rescaling.
+        related_scale_keys: list of keys that could be contingent to this rescale
+        related_shift_keys: list of keys that could be contingent to this rescale
         scale_by : floating or Tensor, default 1.
             The scaling factor by which to multiply fields in ``scale``.
         shift_by : floating or Tensor, default 0.
@@ -32,25 +35,25 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
 
     scale_keys: List[str]
     shift_keys: List[str]
+    related_scale_keys: List[str]
+    related_shift_keys: List[str]
     scale_trainble: bool
     rescale_trainable: bool
-    _all_keys: List[str]
 
     has_scale: bool
     has_shift: bool
-
-    default_dtype: torch.dtype
 
     def __init__(
         self,
         model: GraphModuleMixin,
         scale_keys: Union[Sequence[str], str] = [],
         shift_keys: Union[Sequence[str], str] = [],
+        related_shift_keys: Union[Sequence[str], str] = [],
+        related_scale_keys: Union[Sequence[str], str] = [],
         scale_by=None,
         shift_by=None,
         shift_trainable: bool = False,
         scale_trainable: bool = False,
-        default_dtype: Optional[str] = None,
         irreps_in: dict = {},
     ):
         super().__init__()
@@ -82,16 +85,13 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
 
         self.scale_keys = list(scale_keys)
         self.shift_keys = list(shift_keys)
-        self._all_keys = list(all_keys)
-
-        self.default_dtype = dtype_from_name(
-            torch.get_default_dtype() if default_dtype is None else default_dtype
-        )
+        self.related_scale_keys = list(set(related_scale_keys).union(scale_keys))
+        self.related_shift_keys = list(set(related_shift_keys).union(shift_keys))
 
         self.has_scale = scale_by is not None
         self.scale_trainble = scale_trainable
         if self.has_scale:
-            scale_by = torch.as_tensor(scale_by, dtype=self.default_dtype)
+            scale_by = torch.as_tensor(scale_by)
             if self.scale_trainble:
                 self.scale_by = torch.nn.Parameter(scale_by)
             else:
@@ -107,7 +107,7 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
         self.has_shift = shift_by is not None
         self.rescale_trainable = shift_trainable
         if self.has_shift:
-            shift_by = torch.as_tensor(shift_by, dtype=self.default_dtype)
+            shift_by = torch.as_tensor(shift_by)
             if self.rescale_trainable:
                 self.shift_by = torch.nn.Parameter(shift_by)
             else:
@@ -143,29 +143,16 @@ class RescaleOutput(GraphModuleMixin, torch.nn.Module):
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         data = self.model(data)
         if self.training:
-            # no scaling, but still need to promote for consistent dtype behavior
-            # this is hopefully a no-op in most circumstances due to a
-            # preceeding PerSpecies rescale promoting to default_dtype anyway:
-            for field in self._all_keys:
-                data[field] = data[field].to(dtype=self.default_dtype)
+            return data
         else:
             # Scale then shift
-            # * and + promote dtypes by default, but not when the other
-            # operand is a scalar, which `scale/shift_by` are.
-            # We solve this by expanding `scale/shift_by` to tensors
-            # This is free and doesn't allocate new memory on CUDA:
-            # https://pytorch.org/docs/stable/generated/torch.Tensor.expand.html#torch.Tensor.expand
-            # confirmed in PyTorch slack
-            # https://pytorch.slack.com/archives/C3PDTEV8E/p1671652283801129
             if self.has_scale:
                 for field in self.scale_keys:
-                    v = data[field]
-                    data[field] = v * self.scale_by.expand(v.shape)
+                    data[field] = data[field] * self.scale_by
             if self.has_shift:
                 for field in self.shift_keys:
-                    v = data[field]
-                    data[field] = v + self.shift_by.expand(v.shape)
-        return data
+                    data[field] = data[field] + self.shift_by
+            return data
 
     @torch.jit.export
     def scale(

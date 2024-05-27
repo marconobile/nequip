@@ -2,7 +2,7 @@ from typing import Optional, Union, List
 import inspect
 import logging
 
-from .config import Config, _GLOBAL_ALL_ASKED_FOR_KEYS
+from .config import Config
 
 
 def instantiate_from_cls_name(
@@ -140,7 +140,7 @@ def instantiate(
             if k not in key_mapping["optional"]
         }
 
-    final_optional_args = Config.as_dict(config)
+    final_optional_args = dict(config)
 
     # for nested argument, it is possible that the positional args contain unnecesary keys
     if len(parent_builders) > 0:
@@ -213,32 +213,21 @@ def instantiate(
         for t in key_mapping:
             key_mapping[t].pop(key, None)
 
-    # debug info
-    if len(parent_builders) == 0:
-        # ^ we only want to log or consume arguments for the "unused keys" check
-        #   if this is a root-level build. For subbuilders, we don't want to log
-        #   or, worse, mark keys without prefixes as consumed.
-        logging.debug(
-            f"{'get args for' if return_args_only else 'instantiate'} {builder.__name__}"
-        )
-        for t in key_mapping:
-            for k, v in key_mapping[t].items():
-                string = f" {t:>10s}_args :  {k:>50s}"
-                # key mapping tells us how values got from the
-                # users config (v) to the object being built (k)
-                # thus v is by definition a valid key
-                _GLOBAL_ALL_ASKED_FOR_KEYS.add(v)
-                if k != v:
-                    string += f" <- {v:>50s}"
-                logging.debug(string)
-        logging.debug(f"...{builder.__name__}_param = dict(")
-        logging.debug(f"...   optional_args = {final_optional_args},")
-        logging.debug(f"...   positional_args = {positional_args})")
-
-    # Short circuit for return_args_only
     if return_args_only:
         return key_mapping, final_optional_args
-    # Otherwise, actually build the thing:
+
+    # debug info
+    logging.debug(f"instantiate {builder.__name__}")
+    for t in key_mapping:
+        for k, v in key_mapping[t].items():
+            string = f" {t:>10s}_args :  {k:>50s}"
+            if k != v:
+                string += f" <- {v:>50s}"
+            logging.debug(string)
+    logging.debug(f"...{builder.__name__}_param = dict(")
+    logging.debug(f"...   optional_args = {final_optional_args},")
+    logging.debug(f"...   positional_args = {positional_args})")
+
     try:
         instance = builder(**positional_args, **final_optional_args)
     except Exception as e:
@@ -246,8 +235,7 @@ def instantiate(
             f"Failed to build object with prefix `{prefix}` using builder `{builder.__name__}`"
         ) from e
 
-    return instance, final_optional_args
-
+    return instance, final_optional_args 
 
 def get_w_prefix(
     key: List[str],

@@ -26,21 +26,28 @@ class ConvNetLayer(GraphModuleMixin, torch.nn.Module):
     """
     Args:
 
+    The input atomic feature tensor and the filter have to again be combined in an equivariant manner,
+    which is achieved via a geometric tensor product that yields an output feature that again is rotationally equivariant.
+
+    Features from different tensor product interactions that yield the same rotation and parity pair (lo, po) are mixed by linear atom-wise self-interaction layers.
+    We equip interaction blocks with a ResNet-style update.
+    x' = self-interaction(x) + f(x) where f(x): self-interaction -> convolution -> concatenation -> self-interaction
+    The weights of the Self-Interaction in the preceding formula are learned separately for each species.
     """
 
     resnet: bool
 
     def __init__(
         self,
-        irreps_in,
+        irreps_in, # node_feature : o3.Irrep (eg "1x0e")
         feature_irreps_hidden,
         convolution=InteractionBlock,
         convolution_kwargs: dict = {},
         num_layers: int = 3,
         resnet: bool = False,
         nonlinearity_type: str = "gate",
-        nonlinearity_scalars: Dict[int, Callable] = {"e": "silu", "o": "tanh"},
-        nonlinearity_gates: Dict[int, Callable] = {"e": "silu", "o": "tanh"},
+        nonlinearity_scalars: Dict[int, Callable] = {"e": "ssp", "o": "tanh"},
+        nonlinearity_gates: Dict[int, Callable] = {"e": "ssp", "o": "abs"},
     ):
         super().__init__()
         # initialization
@@ -61,8 +68,8 @@ class ConvNetLayer(GraphModuleMixin, torch.nn.Module):
 
         # We'll set irreps_out later when we know them
         self._init_irreps(
-            irreps_in=irreps_in,
-            required_irreps_in=[AtomicDataDict.NODE_FEATURES_KEY],
+            irreps_in=irreps_in, # in questo irreps in dict ho le info degli output precedenti
+            required_irreps_in=[AtomicDataDict.NODE_FEATURES_KEY], # preconditionin if required data is missing
         )
 
         edge_attr_irreps = self.irreps_in[AtomicDataDict.EDGE_ATTRS_KEY]
@@ -149,22 +156,30 @@ class ConvNetLayer(GraphModuleMixin, torch.nn.Module):
         # updated with whatever the convolution outputs (which is a full graph module)
         self.irreps_out.update(self.conv.irreps_out)
         # but with the features updated by the nonlinearity
-        self.irreps_out[
+        self.irreps_out[ # set in irreps_out the output the irreps of myself
             AtomicDataDict.NODE_FEATURES_KEY
         ] = self.equivariant_nonlin.irreps_out
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+
         # save old features for resnet
         old_x = data[AtomicDataDict.NODE_FEATURES_KEY]
+
         # run convolution
-        data = self.conv(data)
+        data = self.conv(data) # all the blue block in fig 2 center except for residual and non linearity
+
+        #! the paper is wrong in img, non linearity is applied to non-residual path and then added to input-data
         # do nonlinearity
         data[AtomicDataDict.NODE_FEATURES_KEY] = self.equivariant_nonlin(
             data[AtomicDataDict.NODE_FEATURES_KEY]
         )
+
         # do resnet
+        # x' = self-interaction(x) + f(x) where f(x): self-interaction -> convolution -> concatenation -> self-interaction
+        # i don't see the line above in the code
         if self.resnet:
             data[AtomicDataDict.NODE_FEATURES_KEY] = (
                 old_x + data[AtomicDataDict.NODE_FEATURES_KEY]
             )
+
         return data
