@@ -138,3 +138,4 @@ it performs a "functional" update of features, it recombines info that is contai
 share infomation in a self-contained manner.
 The FullyConnectedTensorProduct on the other hand mixes information at different angular frequencies, "creating" thus new information (instead of simply recombining it).
 This is the only way indeed to CREATE new Ls, this layer has lower expressivity then the linear layer wrt the final task but has more "data-extraction" power.
+"The tensor product increases correlation order" -> correlation extractor on steroids
